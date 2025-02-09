@@ -30,7 +30,7 @@ def get_pedals():
         device = hid.device()
         device.open(PEDAL_VENDOR, PEDALS_ID)
         device.set_nonblocking(1) # Set non-blocking mode
-        device.read(64) # Read once to establish connection
+        device.read(64, timeout_ms=1) # Read once to establish connection
         print(f"Connected to Fanatec ClubSport pedals (VID: {PEDAL_VENDOR}, PID: {PEDALS_ID})")
         return device
     except IOError as e:
@@ -42,16 +42,16 @@ def get_pedals():
 
 def handle_pedals(device):
     """handling pedal inputs"""
+    throttle = 0
+    brake = 0
+    
     try:
         #current_time = time.time()
-        throttle = None
-        brake = None
         if not device:
             print("No pedals found, reconnecting")
             return None
 
-        data = device.read(32, timeout_ms=1)
-        #print(f"Pedal data: {data}")
+        data = device.read(64, timeout_ms=1)  # Read pedal
         if data:
             # current_time = time.perf_counter()  # More precise timing
 
@@ -84,7 +84,7 @@ def get_steering():
         #Open the Simagic Alpha Mini racing wheel
         device = hid.device()
         device.open(WHEEL_VENDOR, WHEEL_ID)
-        device.set_nonblocking(1) # Set non-blocking mode
+        #device.set_nonblocking(1) # Set non-blocking mode
         print(f"Connected to Simagic Alpha Mini (VID: {WHEEL_VENDOR}, PID: {WHEEL_ID})")
         device.read(64) # Read once to establish connection
         return device
@@ -100,11 +100,11 @@ def handle_steering(steering_device):
     """Async handler for steering updates"""
     #last_other_data = None
     try:
-        if not steering_device:
-            steering_device = get_steering()
-            if not steering_device:
-                print("No steering wheel found.")
-                return False
+        # if not steering_device:
+        #     steering_device = get_steering()
+        #     if not steering_device:
+        #         print("No steering wheel found.")
+        #         return False
 
         data = steering_device.read(64)
         if data:

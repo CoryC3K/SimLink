@@ -132,6 +132,8 @@ class CRSFDevice:
         self.RC_CHANNELS[0] = 1300 # Steering turn so I know it's alive
         self.steering_device = None
         self.throttle_device = None
+        self.MAX_THROTTLE = int(1811 - (1811-992)*.5) # 100% throttle is 1811, 0% is 992 1811-992 = 819
+        self.MAX_BRAKE = int(992 - (992-172) * .5) # 100% brake is 172, 0% is 992
         # CRSF packets
         self.ping_packet = bytearray([0xEE, 0x04, 0x28, 0x00]) # CRSF_FRAMETYPE_DEVICE_PING [sync] [len] [type] [00 EA = extended] [crc8]
         self.ping_packet.append(CRSFParser.crc8(self.ping_packet) ^ 1 << 1)  # CRC8
@@ -164,7 +166,7 @@ class CRSFDevice:
             'remaining': remaining
         }
 
-        print(f"Battery: {voltage:.1f}V {current:.1f}A {capacity}mAh {remaining}%")
+        #print(f"Battery: {voltage:.1f}V {current:.1f}A {capacity}mAh {remaining}%")
 
     def handle_link_stats(self, data):
         """Parse CRSF link statistics"""
@@ -183,7 +185,7 @@ class CRSFDevice:
             'downlink_snr': payload[9]            # dB
         }
         
-        print(f"Link Stats: RSSI:{-payload[0]}dBm LQ:{payload[2]}% SNR:{payload[3]}dB")
+        #print(f"Link Stats: RSSI:{-payload[0]}dBm LQ:{payload[2]}% SNR:{payload[3]}dB")
 
     def handle_radio_id(self, data):
         """Parse CRSF radio ID packet"""
@@ -207,9 +209,6 @@ class CRSFDevice:
         # else:
         #     print(f"Unhandled radio ID subtype: {subtype:02X}")
 
-
-
-
     def update_rc_channels(self) -> None:
         """Read and transmit RC channels in CRSF protocol format"""
         # Frame: [0xEE, length, type, payload..., crc8]
@@ -226,6 +225,9 @@ class CRSFDevice:
         buffer = 0
         bits_written = 0
         bytes_written = 0
+        steering = 992 # Default to mid-position
+        throttle = 992 # Default to mid-position
+        brake = 0
 
         # Get control values from RCInputController
         
@@ -241,30 +243,35 @@ class CRSFDevice:
         
         if self.throttle_device:
             res = handle_pedals(self.throttle_device)
-            if res[1] is None:
+            if res is not None:
+                throttle, brake = res
+            else:
                 return False
-            throttle, brake = res
         else:
             print("No throttle device, searching...")
             self.throttle_device = get_pedals()
             return False
 
-        #brake = self.controls.brake
         #print(f"Steering: {steering}, Throttle: {throttle}, Brake: {brake}")
 
         # Convert to CRSF values (172-1811 range)
         #  // Conversion of CRSF channel value <-> us
         # crsf = 992 + (8/5 * (us - 1500))
         # us = 1500 + (5/8 * (crsf - 992))
-        steering_crsf = int(self.map(steering, 0, 2560, 172, 1811))
-        throttle_crsf = int(self.map(throttle, 0, 256, 992, 1811))
+        steering_crsf = int(self.map(steering, 0, 2560, 1811, 172))
+        throttle_crsf = int(self.map(throttle, 0, 256, 992, self.MAX_THROTTLE)) # middle to full, no brakes
+        brake_crsf = int(self.map(brake, 0, 256, 992, self.MAX_BRAKE)) # middle to full, no brakes
         #steering_crsf = int(172 + (steering + 1) * 819.5)  # Map -1 to 1 to 172-1811
         #throttle_crsf = int(172 + throttle * 1639)  # Map 0 to 1 to 172-1811
         #brake_crsf = int(172 + brake * 1639)  # Map 0 to 1 to 172-1811
+        #print(f"Steering: {steering_crsf}, Throttle: {throttle_crsf}, Brake: {brake_crsf}")
 
         # Set CRSF values
         self.RC_CHANNELS[0] = steering_crsf
-        self.RC_CHANNELS[1] = throttle_crsf
+        if brake_crsf < 992:
+            self.RC_CHANNELS[1] = brake_crsf
+        else:
+            self.RC_CHANNELS[1] = throttle_crsf # - brake_crsf  # Throttle + Brake
 
         # Pack 11-bit channel values into bytes
         for ch_num, value in enumerate(self.RC_CHANNELS):
@@ -286,8 +293,9 @@ class CRSFDevice:
         packet.append(CRSFParser.crc8(packet))
 
         # Send frame
-        self.serial.write(packet)
-        self.last_tx = time.time()
+        if self.serial.is_open:
+            self.serial.write(packet)
+            self.last_tx = time.time()
 
         #print("TXRC:" + " ".join([f"{b:02X}" for b in packet]))
 
@@ -402,6 +410,10 @@ class CRSFDevice:
         if crc != frame[-1]:
             print(f"CRC mismatch: {crc:02X} != {frame[-1]:02X}")
             return
+        
+        if len(data) < 3:
+            print("Invalid packet length")
+            return
 
         # Verify sync byte is device address or:
         # Serial sync byte: 0xC8; Broadcast device address: 0x00;
@@ -467,7 +479,6 @@ class CRSFDevice:
                 self.update_rc_channels()
 
         self.handle_rx()
-        time.sleep(0.001)  # 1ms loop time
 
     def run(self) -> None:
         try:
