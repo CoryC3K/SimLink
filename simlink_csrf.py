@@ -132,8 +132,8 @@ class CRSFDevice:
         self.RC_CHANNELS[0] = 1300 # Steering turn so I know it's alive
         self.steering_device = None
         self.throttle_device = None
-        self.MAX_THROTTLE = int(1811 - (1811-992)*.5) # 100% throttle is 1811, 0% is 992 1811-992 = 819
-        self.MAX_BRAKE = int(992 - (992-172) * .5) # 100% brake is 172, 0% is 992
+        self.max_throttle = int(1811 - (1811-992)*.5) # 100% throttle is 1811, 0% is 992 1811-992 = 819
+        self.max_brake = int(992 - (992-172) * .5) # 100% brake is 172, 0% is 992
         # CRSF packets
         self.ping_packet = bytearray([0xEE, 0x04, 0x28, 0x00]) # CRSF_FRAMETYPE_DEVICE_PING [sync] [len] [type] [00 EA = extended] [crc8]
         self.ping_packet.append(CRSFParser.crc8(self.ping_packet) ^ 1 << 1)  # CRC8
@@ -146,6 +146,11 @@ class CRSFDevice:
         }
         self.link_stats = {}
         self.radio_sync = {'interval': 0, 'phase': 0}
+
+        self.filter_size = 5
+        self.throttle_buffer = [992] * self.filter_size 
+        self.brake_buffer = [992] * self.filter_size
+        self.steering_buffer = [992] * self.filter_size
 
     def map(self, x, in_min, in_max, out_min, out_max):
         return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
@@ -259,11 +264,22 @@ class CRSFDevice:
         # crsf = 992 + (8/5 * (us - 1500))
         # us = 1500 + (5/8 * (crsf - 992))
         steering_crsf = int(self.map(steering, 0, 2560, 1811, 172))
-        throttle_crsf = int(self.map(throttle, 0, 256, 992, self.MAX_THROTTLE)) # middle to full, no brakes
-        brake_crsf = int(self.map(brake, 0, 256, 992, self.MAX_BRAKE)) # middle to full, no brakes
+        throttle_crsf = int(self.map(throttle, 0, 256, 992, self.max_throttle)) # middle to full, no brakes
+        brake_crsf = int(self.map(brake, 0, 256, 992, self.max_brake)) # middle to full, no brakes
         #steering_crsf = int(172 + (steering + 1) * 819.5)  # Map -1 to 1 to 172-1811
         #throttle_crsf = int(172 + throttle * 1639)  # Map 0 to 1 to 172-1811
         #brake_crsf = int(172 + brake * 1639)  # Map 0 to 1 to 172-1811
+        
+
+        # Apply moving average filter
+        self.steering_buffer = self.steering_buffer[1:] + [steering_crsf]
+        self.throttle_buffer = self.throttle_buffer[1:] + [throttle_crsf]
+        self.brake_buffer = self.brake_buffer[1:] + [brake_crsf]
+
+        steering_crsf = sum(self.steering_buffer) // self.filter_size
+        throttle_crsf = sum(self.throttle_buffer) // self.filter_size
+        brake_crsf = sum(self.brake_buffer) // self.filter_size
+
         #print(f"Steering: {steering_crsf}, Throttle: {throttle_crsf}, Brake: {brake_crsf}")
 
         # Set CRSF values
