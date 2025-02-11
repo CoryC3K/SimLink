@@ -1,6 +1,10 @@
 # SimLink
 Use a car sim rig or other inputs via python to drive an RC car or other ELRS converted device.
 
+Wheel input -> Windows -> hid -> Python -> Serial -> ELRS TX 
+... over the air ...
+ELRS RX on the receiving car/boat/plane. $9.99 each and a serial adapter. 
+
 Requires: python 3, pyserial, and hidapi.
 
 Requires: ExpressLRS Configurator. One time to setup the TX by checking the "is TX" box.
