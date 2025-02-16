@@ -5,7 +5,7 @@ Wheel input -> Windows -> hid -> Python -> Serial -> ELRS TX
 ... over the air ...
 ELRS RX on the receiving car/boat/plane. $9.99 each and a serial adapter. 
 
-Requires: python 3, pyserial, and hidapi.
+Requires: python 3, pyserial, and hidapi (both python hid and the separate hidapi, "apt install libhidapi-hidraw0 libhidapi-dev" will do both)
 
 Requires: ExpressLRS Configurator. One time to setup the TX by checking the "is TX" box.
 
