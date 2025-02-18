@@ -175,19 +175,21 @@ class SimLinkGUI:
 
     def update_parameters_display(self):
         """ Update parameters display """
-        if self.crsf_tx:
+        if self.crsf_tx and self.crsf_tx.parameters:
             self.params_text.config(state='normal')
             self.params_text.delete(1.0, tk.END)
+
             for idx, param in self.crsf_tx.parameters.items():
-                if param.get("parameter_number") is None:
+                if "parameter_number" not in param or param["parameter_number"] is None:
                     continue
-                if param.get("chunk") is None:
+                if "chunk" not in param or param["chunk"] is None:
                     continue
 
                 out_str = f'{param["parameter_number"]}:{param["chunk_header"]["name"]} = '
                 option = param["chunk"]["options"][param["chunk"]["value"]] # option list at value address
                 out_str += f"\t{option}\n"
                 self.params_text.insert(tk.END, out_str)
+                #self.crsf_tx.parameters.pop(idx) # Remove displayed parameter
             self.params_text.config(state='disabled')
 
     def update_parameters(self):
