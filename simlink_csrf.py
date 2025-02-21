@@ -62,6 +62,49 @@ class CRSFParser:
             "param_count": data[idx+12],
             "protocol_version": data[idx+13]
         }
+    
+    @staticmethod
+    def parse_param_value(data: bytearray, param_type: int) -> Any:
+        """
+        Parse value of type paramType
+        For types 0x00 - 0x07, value contains multiple fields of the base type T, sent in big endian
+
+        T current value
+        T minimum value allowed
+        T maximum value allowed
+        string units
+
+        """
+        idx = 0
+        if param_type in [paramType.UINT8.value, paramType.INT8.value]:
+            size = 1
+        elif param_type in [paramType.UINT16.value, paramType.INT16.value]:
+            size = 2
+        elif param_type in [paramType.UINT32.value, paramType.INT32.value]:
+            size = 4
+        else:
+            raise ValueError(f"Unsupported param type: {param_type}")
+
+        # Parse current value, min value, max value
+        current_value = int.from_bytes(data[idx:idx + size], 'big', signed=(param_type % 2 == 1))
+        idx += size
+        min_value = int.from_bytes(data[idx:idx + size], 'big', signed=(param_type % 2 == 1))
+        idx += size
+        max_value = int.from_bytes(data[idx:idx + size], 'big', signed=(param_type % 2 == 1))
+        idx += size
+
+        # Parse the null-terminated unit string
+        unit = ""
+        while data[idx] != 0:
+            unit += chr(data[idx])
+            idx += 1
+
+        return {
+            "current_value": current_value,
+            "min_value": min_value,
+            "max_value": max_value,
+            "unit": unit
+        }
 
     @staticmethod
     def parse_param_float(data: bytearray) -> Dict[str, Any]:
@@ -160,9 +203,18 @@ class CRSFParser:
     def parse_param_folder(data: bytearray) -> Dict[str, Any]:
         """
         Parse the folder type from a parameter packet
+        TBS spec says list of children
+        crsf-wg spec says string display name...
         """
         list_of_children = ""
         idx = 0
+
+        # Some folders are empty, don't run off the end
+        if len(data[idx:]) < 2:
+            return {
+                "list_of_children": []
+            }
+
         while data[idx] != 0:
             list_of_children += chr(data[idx])
             idx += 1
@@ -172,50 +224,52 @@ class CRSFParser:
             "list_of_children": list_of_children.split(';')
         }
     
-    @staticmethod
-    def parse_param_info(data: bytearray) -> Dict[str, Any]:
-        """
-        Parse parameter info, just a null-term string
-        """
-        info = ""
-        idx = 0
-        while data[idx] != 0:
-            info += chr(data[idx])
-            idx += 1
-        return info
+    # @staticmethod
+    # def parse_param_info(data: bytearray) -> Dict[str, Any]:
+    #     """
+    #     Parse parameter info, just a null-term string
+    #     """
+    #     info = ""
+    #     idx = 0
+    #     while data[idx] != 0:
+    #         info += chr(data[idx])
+    #         idx += 1
+    #     return info
     
-    @staticmethod
-    def parse_param_command(data: bytearray) -> Dict[str, Any]:
-        """
-        Parse parameter command, just a null-term string
-        """
-        status = data[0]
-        timeout = data[1]
-        info = ""
-        idx = 2
+    # @staticmethod
+    # def parse_param_command(data: bytearray) -> Dict[str, Any]:
+    #     """
+    #     Parse parameter command, just a null-term string
+    #     """
+    #     status = data[0]
+    #     timeout = data[1]
+    #     info = ""
+    #     idx = 2
 
-        while data[idx] != 0:
-            info += chr(data[idx])
-            idx += 1
+    #     while data[idx] != 0:
+    #         info += chr(data[idx])
+    #         idx += 1
 
-        return {
-            "status": status,
-            "timeout": timeout,
-            "info": info
-        }
+    #     return {
+    #         "status": status,
+    #         "timeout": timeout,
+    #         "info": info
+    #     }
 
     @staticmethod
     def parse_common_param_fields(data: bytearray) -> Dict[str, Any]:
         """
-        Parse common parameter fields: parent_folder, data_type, and name
+        Parse common parameter fields: 
+        parent_folder, data_type, and name
         """
         idx = 0
         parent_folder = data[idx]
 
+        # Workaround for issue w/ rp3's data?
         if parent_folder == '\t':
             parent_folder = 0
-
         idx += 1
+
         data_type = data[idx]
         idx += 1
 
@@ -231,7 +285,7 @@ class CRSFParser:
             "parent_folder": parent_folder,
             "type": data_type,
             "name": name,
-            "idx": idx  # Return the current index for further parsing
+            "idx": idx  # for specific parsing
         }
 
     def parse_specific_param_fields(self, param_info: Dict[str, Any], payload: bytearray) -> Dict[str, Any]:
@@ -245,8 +299,7 @@ class CRSFParser:
 
         if pkt_type < paramType.FLOAT.value:
             print(f"warn{param_info['parameter_number']}: depreciated param type: {paramType(pkt_type).name}")
-            #pkt_type = paramType.FLOAT.value
-            param_info["chunk"] = param_payload
+            param_info["chunk"] = CRSFParser.parse_param_value(param_payload, pkt_type)
 
         if pkt_type == paramType.FLOAT.value:
             param_info["chunk"] = CRSFParser.parse_param_float(param_payload)
@@ -257,9 +310,9 @@ class CRSFParser:
         if pkt_type == paramType.STRING.value:
             param_info["chunk"] = CRSFParser.parse_param_string(param_payload)
 
-        #if pkt_type == paramType.FOLDER.value:
+        if pkt_type == paramType.FOLDER.value:
             # Weird issue where the folder has no list of children
-            #param_info["chunk"] = CRSFParser.parse_param_folder(param_payload)
+            param_info["chunk"] = CRSFParser.parse_param_folder(param_payload)
 
         if pkt_type == paramType.OUT_OF_RANGE.value:
             print(f"Out of range parameter: {param_info['parameter_number']}")
@@ -465,7 +518,16 @@ class CRSFDevice:
         packet = bytearray([0xEE, 0x06, 0x2C, 0xEE, 0xEA, param_idx, chunk_idx])
         packet.append(CRSFParser.crc8(packet))
         self.serial.write(packet)
+        self.last_tx = time.time()
         #print(f"TX: Requesting param {param_idx} chunk {chunk_idx}:{' '.join([f'{b:02X}' for b in packet])}")
+
+    def request_elrs_status(self):
+        """ Request ELRS status from CRSF device"""
+        packet = bytearray([0x00, 0x06, 0x2D, 0x2E, 0x00])
+        packet.append(CRSFParser.crc8(packet))
+        self.serial.write(packet)
+        self.last_tx = time.time()
+        print("Requested ELRS status")
 
     def crsf_parameter_settings(self, raw_param_data):
         """ Handler for CRSF-spec parameter data coming in """
@@ -492,7 +554,14 @@ class CRSFDevice:
         # Easy reference the current param's buffer slot,
         # and load the right chunk into it's own indexed slot
         chunk_store = self.param_buff[param_num]
-        chunk_store['chunks'][chunk_index] = payload_chunk
+        if chunk_index < len(chunk_store['chunks']):
+            if chunk_store['chunks'][chunk_index] is not None:
+                print(f"Duplicate chunk {chunk_index} for param {param_num}")
+            else:
+                chunk_store['chunks'][chunk_index] = payload_chunk
+        else:
+            print(f"Invalid chunk index: {chunk_index} for param {param_num} with {len(chunk_store['chunks'])} chunks")
+            return
 
         # Check if all positions have data
         if all(chunk is not None for chunk in chunk_store['chunks']):
@@ -500,36 +569,32 @@ class CRSFDevice:
             for chunk in reversed(chunk_store['chunks']):
                 combined_data.extend(chunk)
 
-            self.parameters[param_num] = combined_data
+            # Clear the buffer
+            for i in range(len(self.param_buff[param_num]['chunks'])):
+                self.param_buff[param_num]['chunks'][i] = None
 
             try:
-                print(f"Param {param_num} raw chunk: {self.parameters[param_num]}")
-                print(f"Param {param_num} raw cbuff: {self.param_buff[param_num]['chunks']}")
-                # Try and parse the parameter into it's own types, all types share first 3 fields
-                # so you can identify them
+                # Try and parse the parameter into it's own types
+                # all types share first 3 fields so you can identify them
                 param_info = {}
                 param_info["parameter_number"] = param_num
                 param_info["parameter_chunks_remaining"] = chunk_index
                 param_info["chunk_header"] = CRSFParser.parse_common_param_fields(combined_data)
-                print(f"Param {param_num} header: {param_info['chunk_header']}")
                 param_info = CRSFParser.parse_specific_param_fields(self, param_info, combined_data)
                 self.parameters[param_num] = param_info
 
-                print(f"Param {param_num} out: {self.parameters[param_num]}")
+                #print(f"Param {param_num}:\n\t{param_info['chunk_header']['name']} - {self.parameters[param_num]}")
             except Exception as e:
                 print(f"Error parsing parameter {param_num}: {e}")
-                print(f"Raw buff: {self.param_buff[param_num]}")
+                print(f"Raw buff: {raw_param_data}")
+                self.parameters[param_num] = combined_data
                 return
 
-            # Remove the buffer for the next update of this one
-            del self.param_buff[param_num]
-
-            # Auto-request the next parameter if we're refreshing
-            # if it's empty!!!
-            if self.tx_state== ConnectionState.PARAMETERS:
-                if (param_num + 1) in self.parameters.keys():
-                    if param_num + 1 < self.device_info["param_count"]:
-                        self.request_parameter(param_num + 1, 0)
+            # # Auto-request the next parameter if we're refreshing
+            # if self.tx_state == ConnectionState.PARAMETERS:
+            #     if (param_num + 1) in self.parameters.keys():
+            #         if param_num + 1 < self.device_info["param_count"]:
+            #             self.request_parameter(param_num + 1, 0)
 
         else:
             # Request any missing chunk, but just one at a time
@@ -605,21 +670,22 @@ class CRSFDevice:
         if rcvd_len != expected_len or len(data) > 64: # CRSF hard limit of 64 bytes
             # Truncate data to expected length
             if len(data) > expected_len + 2:
+                print(f"ERR:trimmed: len[{len(data)}>{expected_len}]: {' '.join([f'{b:02X}' for b in data])}")
                 data = data[:expected_len + 2]
             else:
-                #print(f"ERR: len[{len(data)}<{expected_len}]: {' '.join([f'{b:02X}' for b in data])}")
+                print(f"ERR: len[{len(data)}!={expected_len}]: {' '.join([f'{b:02X}' for b in data])}")
                 return
 
         # CRC is calculated over all bytes except CRC itself
         crc = CRSFParser.crc8(data[:-1])
         if crc != data[-1]:
-            #print(f"CRC mismatch: {crc:02X} != {data[-1]:02X}")
+            print(f"CRC mismatch: {crc:02X} != {data[-1]:02X}")
             return
 
         try:
             store = data[2]
         except IndexError:
-            #print(f"Index error[2]: {data}")
+            print(f"Index error[2]: {data}")
             return
         
         # CRC, length, sync checks all done, now we can parse the packet
@@ -692,6 +758,7 @@ class CRSFDevice:
                     # If we've got an RX connected too
                 if now - self.link_stats['last_update'] > 5: # Haven't gotten an update in 5s
                     self.request_link_stats()
+                    self.request_elrs_status()
                     self.link_stats['last_update'] = now
                     self.link_stats['uplink_link_quality'] = 0
                     self.link_stats['uplink_rssi_1'] = 0
