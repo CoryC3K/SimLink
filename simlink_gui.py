@@ -13,6 +13,9 @@ from tkinter import ttk
 from simlink_csrf import CRSFDevice, ConnectionState
 from simlink_input_HID import InputController, FanatecPedals, SimagicWheel, RadiomasterJoystick
 from simlink_serial import SerialManager
+import hid
+import json
+import os
 
 class SimLinkGUI:
     """ SimLink CRSF GUI """
@@ -28,9 +31,10 @@ class SimLinkGUI:
 
         # Initialize InputController
         self.input_controller = InputController()
-        self.init_input_devices()
+        #self.init_input_devices()
 
         self.init_ui()
+        self.load_settings()  # Load settings after UI is initialized
 
         # Start background data update thread
         self.update_thread = threading.Thread(target=self.controller_loop)
@@ -72,6 +76,24 @@ class SimLinkGUI:
 
         self.connect_btn = ttk.Button(conn_frame, text='Connect', command=self.toggle_connection)
         self.connect_btn.pack(side='right')
+
+        # HID Device selectors
+        hid_frame = ttk.LabelFrame(self.root, text="HID Device Selection")
+        hid_frame.pack(fill='x', padx=5, pady=5)
+
+        # Steering device selector (label above)
+        ttk.Label(hid_frame, text="Steering Device:").pack(anchor='w', padx=5)
+        self.steering_device_combo = ttk.Combobox(hid_frame, state="readonly")
+        self.steering_device_combo.pack(fill='x', padx=5, pady=(0, 5))
+
+        # Throttle/Brake device selector (label above)
+        ttk.Label(hid_frame, text="Throttle/Brake Device:").pack(anchor='w', padx=5)
+        self.throttle_device_combo = ttk.Combobox(hid_frame, state="readonly")
+        self.throttle_device_combo.pack(fill='x', padx=5, pady=(0, 5))
+
+        self.refresh_hid_devices()
+        self.steering_device_combo.bind("<<ComboboxSelected>>", self.on_hid_selection)
+        self.throttle_device_combo.bind("<<ComboboxSelected>>", self.on_hid_selection)
 
         # Status labels
         self.serial_status = tk.StringVar(value='TX USB: Disconnected')
@@ -190,7 +212,6 @@ class SimLinkGUI:
         ttk.Label(steering_frame, text="Steering:", width=label_width, anchor='e').pack(side='left')
         self.steering_chart = tk.Canvas(steering_frame, width=200, height=20, bg='white')
         self.steering_chart.pack(side='left', fill='x', expand=True, padx=5)
-
 
     def refresh_ports(self):
         """Refresh available COM ports with descriptions"""
@@ -469,29 +490,39 @@ class SimLinkGUI:
             fill='black'
         )
 
-    def init_input_devices(self):
-        """Initialize and register input devices. Handles missing devices gracefully."""
-        # List of (device class, vendor_id, product_id)
-        device_specs = [
-            (FanatecPedals, 0x0eb7, 0x1a95),
-            (SimagicWheel, 0x483, 0x522),
-            (RadiomasterJoystick, 0x1209, 0x4f54),
-        ]
-        for device_cls, vid, pid in device_specs:
-            try:
-                device = device_cls(vendor_id=vid, product_id=pid)
-                device.connect()
-                print(device)
-                print("device connected?" + str(device.connected))
-                print(getattr(device, "connected", True))
-                if device is not None and device.connected is True:  # If device has a 'connected' attribute, check it
-                    self.input_controller.register_device(device)
-                    print(f"{device_cls.__name__} connected and registered.")
-                    print(f"Device info: {device.read_data()}")
-                else:
-                    print(f"{device_cls.__name__} not connected.")
-            except Exception as e:
-                print(f"Could not connect/register {device_cls.__name__}: {e}")
+    def refresh_hid_devices(self):
+        """Scan and list all HID devices for selection."""
+        devices = hid.enumerate()
+        device_list = []
+        self.hid_device_map = {}
+        for d in devices:
+            desc = f"{d['product_string']} (VID: {hex(d['vendor_id'])}, PID: {hex(d['product_id'])})"
+            device_list.append(desc)
+            self.hid_device_map[desc] = (d['vendor_id'], d['product_id'])
+        self.steering_device_combo['values'] = device_list
+        self.throttle_device_combo['values'] = device_list
+        if device_list:
+            self.steering_device_combo.current(0)
+            self.throttle_device_combo.current(0)
+
+    def on_hid_selection(self, event=None):
+        """Register selected HID devices for steering and throttle/brake."""
+        # Remove all devices first
+        self.input_controller.devices = []
+
+        # Steering device
+        steering_desc = self.steering_device_combo.get()
+        if steering_desc in self.hid_device_map:
+            vid, pid = self.hid_device_map[steering_desc]
+            print(f"Registering steering device VID: {vid}, PID: {pid}")
+            self.input_controller.register_device(vid, pid)
+
+        # Throttle/Brake device
+        throttle_desc = self.throttle_device_combo.get()
+        if throttle_desc in self.hid_device_map and throttle_desc != steering_desc:
+            vid, pid = self.hid_device_map[throttle_desc]
+            print(f"Registering throttle/brake device VID: {vid}, PID: {pid}")
+            self.input_controller.register_device(vid, pid)
 
     def controller_loop(self):
         """
@@ -584,8 +615,47 @@ class SimLinkGUI:
 
         return param
 
+    def save_settings(self):
+        """Save GUI settings to simlink.json"""
+        settings = {
+            "steering_device": self.steering_device_combo.get(),
+            "throttle_device": self.throttle_device_combo.get(),
+            "com_port": self.port_combo.get(),
+            "throttle_scale": self.throttle_scale.get(),
+            "brake_scale": self.brake_scale.get(),
+            "max_steer_scale": self.max_steer_scale.get()
+        }
+        with open("simlink.json", "w") as f:
+            json.dump(settings, f, indent=2)
+        print("Settings saved to simlink.json")
+
+    def load_settings(self):
+        """Load GUI settings from simlink.json"""
+        if not os.path.exists("simlink.json"):
+            return
+        try:
+            with open("simlink.json", "r") as f:
+                settings = json.load(f)
+            # Set values if present
+            if "steering_device" in settings and settings["steering_device"] in self.steering_device_combo['values']:
+                self.steering_device_combo.set(settings["steering_device"])
+            if "throttle_device" in settings and settings["throttle_device"] in self.throttle_device_combo['values']:
+                self.throttle_device_combo.set(settings["throttle_device"])
+            if "com_port" in settings and settings["com_port"] in self.port_combo['values']:
+                self.port_combo.set(settings["com_port"])
+            if "throttle_scale" in settings:
+                self.throttle_scale.set(settings["throttle_scale"])
+            if "brake_scale" in settings:
+                self.brake_scale.set(settings["brake_scale"])
+            if "max_steer_scale" in settings:
+                self.max_steer_scale.set(settings["max_steer_scale"])
+            print("Settings loaded from simlink.json")
+        except Exception as e:
+            print(f"Failed to load settings: {e}")
+
     def on_closing(self):
         """ Close window """
+        self.save_settings()
         self.running = False
         if self.crsf_tx:
             self.crsf_tx.serial.close()

@@ -52,6 +52,7 @@ class FanatecPedals(InputDevice):
         if data:
             throttle = int(data[0])
             brake = int(data[1])
+            #print(f"Fanatec data: {data} -> Throttle: {throttle}, Brake: {brake}")
             return throttle, brake
         return None, None
 
@@ -158,9 +159,35 @@ class InputController:
 
         #print(f"Updated Inputs - Steering: {self.steering_value}, Throttle: {self.throttle_value}, Brake: {self.brake_value}")
 
-    def register_device(self, device):
+    def register_device(self, vendor_id, product_id):
         """Register a new input device."""
+        # (FanatecPedals, 0x0eb7, 0x1a95),
+        # (SimagicWheel, 0x483, 0x522),
+        # (RadiomasterJoystick, 0x1209, 0x4f54),
+
+        if isinstance(vendor_id, str):
+            vendor_id = int(vendor_id, 16) if vendor_id.startswith("0x") else int(vendor_id)
+        if isinstance(product_id, str):
+            product_id = int(product_id, 16) if product_id.startswith("0x") else int(product_id)
+
+        print(f"Registering device VID: {vendor_id}, PID: {product_id}")
+        if vendor_id == 0xeb7:
+            # Fanatec Pedals
+            device = FanatecPedals(vendor_id, product_id)
+        elif vendor_id == 0x483:
+            # Simagic Wheel
+            device = SimagicWheel(vendor_id, product_id)
+        elif vendor_id == 0x1209:
+            # Radiomaster Joystick
+            device = RadiomasterJoystick(vendor_id, product_id)
+        else:
+            print(f"Unknown device (VID: {vendor_id}, PID: {product_id}), cannot register.")
+            return
+        device.connect()
         self.devices.append(device)
+        print(f"Device registered: VID: {vendor_id}, PID: {product_id}")
+        print(f"devices list: {self.devices}")
+        self.update_inputs()
 
     def print_inputs(self):
         """Print the current input values."""
