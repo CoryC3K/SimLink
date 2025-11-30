@@ -34,7 +34,6 @@ class SimLinkGUI:
         #self.init_input_devices()
 
         self.init_ui()
-        self.load_settings()  # Load settings after UI is initialized
 
         # Start background data update thread
         self.update_thread = threading.Thread(target=self.controller_loop)
@@ -43,6 +42,10 @@ class SimLinkGUI:
 
         # Start periodic serial status check
         self.check_serial_status()
+
+        # Refresh HID devices list
+        self.refresh_hid_devices()
+        self.load_settings()  # Load settings after UI is initialized
 
         # Start GUI loop in main thread
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -90,8 +93,6 @@ class SimLinkGUI:
         ttk.Label(hid_frame, text="Throttle/Brake Device:").pack(anchor='w', padx=5)
         self.throttle_device_combo = ttk.Combobox(hid_frame, state="readonly")
         self.throttle_device_combo.pack(fill='x', padx=5, pady=(0, 5))
-
-        self.refresh_hid_devices()
         self.steering_device_combo.bind("<<ComboboxSelected>>", self.on_hid_selection)
         self.throttle_device_combo.bind("<<ComboboxSelected>>", self.on_hid_selection)
 
@@ -196,8 +197,6 @@ class SimLinkGUI:
         ttk.Label(throttle_frame, text="Throttle:", width=label_width, anchor='e').pack(side='left')
         self.throttle_chart = tk.Canvas(throttle_frame, width=200, height=20, bg='white')
         self.throttle_chart.pack(side='left', fill='x', expand=True, padx=5)
-        
-
 
         # Brake chart
         brake_frame = ttk.Frame(charts_frame)
@@ -491,7 +490,7 @@ class SimLinkGUI:
         )
 
     def refresh_hid_devices(self):
-        """Scan and list all HID devices for selection."""
+        """Scan and list all HID devices for selection. Auto-register known devices from simlink.json."""
         devices = hid.enumerate()
         device_list = []
         self.hid_device_map = {}
@@ -504,6 +503,19 @@ class SimLinkGUI:
         if device_list:
             self.steering_device_combo.current(0)
             self.throttle_device_combo.current(0)
+
+        # --- Auto-register known devices from simlink.json ---
+        try:
+            with open("simlink.json", "r") as f:
+                settings = json.load(f)
+            mappings = settings.get("mappings", {})
+            for desc, (vid, pid) in self.hid_device_map.items():
+                key = f"{vid:04x}:{pid:04x}"
+                if key in mappings:
+                    print(f"Auto-registering known device: {desc}")
+                    self.input_controller.register_device(vid, pid)
+        except Exception as e:
+            print(f"Auto-register failed: {e}")
 
     def on_hid_selection(self, event=None):
         """Register selected HID devices for steering and throttle/brake."""
@@ -523,6 +535,7 @@ class SimLinkGUI:
             vid, pid = self.hid_device_map[throttle_desc]
             print(f"Registering throttle/brake device VID: {vid}, PID: {pid}")
             self.input_controller.register_device(vid, pid)
+
 
     def controller_loop(self):
         """
@@ -576,6 +589,9 @@ class SimLinkGUI:
                     self.param_queue.put(decoded_params, block=False)
                     #print(f"tx Param Queue: {self.param_queue.qsize()}")
 
+                except queue.Full:
+                    print("Queue full, skipping update")
+
                 except Exception as e:
                     self.crsf_tx = None
                     self.serial_status.set('USB: Disconnected')
@@ -584,9 +600,6 @@ class SimLinkGUI:
                         'battery': 'Battery: --',
                         'link': 'Link: --'
                     }))
-
-                except queue.Full:
-                    print("Queue full, skipping update")
 
             else:
                 if time.time() % 1 < 1e-3: # Refresh every second
@@ -616,8 +629,19 @@ class SimLinkGUI:
         return param
 
     def save_settings(self):
-        """Save GUI settings to simlink.json"""
-        settings = {
+        """Save GUI settings to simlink.json, preserving mappings and other sections."""
+        # Load existing settings if present
+        try:
+            if os.path.exists("simlink.json"):
+                with open("simlink.json", "r") as f:
+                    settings = json.load(f)
+            else:
+                settings = {}
+        except Exception:
+            settings = {}
+
+        # Update GUI settings (in a subkey to avoid clobbering mappings)
+        gui_settings = {
             "steering_device": self.steering_device_combo.get(),
             "throttle_device": self.throttle_device_combo.get(),
             "com_port": self.port_combo.get(),
@@ -625,6 +649,8 @@ class SimLinkGUI:
             "brake_scale": self.brake_scale.get(),
             "max_steer_scale": self.max_steer_scale.get()
         }
+        settings["gui"] = gui_settings
+
         with open("simlink.json", "w") as f:
             json.dump(settings, f, indent=2)
         print("Settings saved to simlink.json")
@@ -636,19 +662,20 @@ class SimLinkGUI:
         try:
             with open("simlink.json", "r") as f:
                 settings = json.load(f)
+            gui_settings = settings.get("gui", settings)  # fallback for old format
             # Set values if present
-            if "steering_device" in settings and settings["steering_device"] in self.steering_device_combo['values']:
-                self.steering_device_combo.set(settings["steering_device"])
-            if "throttle_device" in settings and settings["throttle_device"] in self.throttle_device_combo['values']:
-                self.throttle_device_combo.set(settings["throttle_device"])
-            if "com_port" in settings and settings["com_port"] in self.port_combo['values']:
-                self.port_combo.set(settings["com_port"])
-            if "throttle_scale" in settings:
-                self.throttle_scale.set(settings["throttle_scale"])
-            if "brake_scale" in settings:
-                self.brake_scale.set(settings["brake_scale"])
-            if "max_steer_scale" in settings:
-                self.max_steer_scale.set(settings["max_steer_scale"])
+            if "steering_device" in gui_settings and gui_settings["steering_device"] in self.steering_device_combo['values']:
+                self.steering_device_combo.set(gui_settings["steering_device"])
+            if "throttle_device" in gui_settings and gui_settings["throttle_device"] in self.throttle_device_combo['values']:
+                self.throttle_device_combo.set(gui_settings["throttle_device"])
+            if "com_port" in gui_settings and gui_settings["com_port"] in self.port_combo['values']:
+                self.port_combo.set(gui_settings["com_port"])
+            if "throttle_scale" in gui_settings:
+                self.throttle_scale.set(gui_settings["throttle_scale"])
+            if "brake_scale" in gui_settings:
+                self.brake_scale.set(gui_settings["brake_scale"])
+            if "max_steer_scale" in gui_settings:
+                self.max_steer_scale.set(gui_settings["max_steer_scale"])
             print("Settings loaded from simlink.json")
         except Exception as e:
             print(f"Failed to load settings: {e}")
@@ -660,6 +687,54 @@ class SimLinkGUI:
         if self.crsf_tx:
             self.crsf_tx.serial.close()
         self.root.quit()
+
+    def calibrate_device(self, vendor_id, product_id):
+        """Guide user to move each axis and record mapping."""
+        import tkinter.simpledialog
+        mapping = {}
+        device = GenericHIDDevice(vendor_id, product_id)
+        device.connect()
+        for axis in ['steering', 'throttle', 'brake']:
+            tk.messagebox.showinfo("Calibration", f"Please move the {axis} control through its full range, then click OK.")
+            observed = {}
+            for _ in range(100):  # Sample for a short period
+                data = device.read_data(128)
+                if data:
+                    for i, val in enumerate(data):
+                        if i not in observed:
+                            observed[i] = [val, val]
+                        else:
+                            observed[i][0] = min(observed[i][0], val)
+                            observed[i][1] = max(observed[i][1], val)
+                self.root.update()
+                time.sleep(0.02)
+            # Find the index with the largest range
+            best_index, best_range = None, 0
+            for i, (vmin, vmax) in observed.items():
+                rng = vmax - vmin
+                if rng > best_range:
+                    best_index, best_range = i, rng
+            if best_index is not None:
+                mapping[axis] = {'index': best_index, 'min': observed[best_index][0], 'max': observed[best_index][1]}
+        device.disconnect()
+        # Save mapping to settings
+        self.save_device_mapping(vendor_id, product_id, mapping)
+        return mapping
+
+    def save_device_mapping(self, vendor_id, product_id, mapping):
+        """Save mapping to simlink.json under a 'mappings' section."""
+        import json
+        try:
+            with open("simlink.json", "r") as f:
+                settings = json.load(f)
+        except Exception:
+            settings = {}
+        if "mappings" not in settings:
+            settings["mappings"] = {}
+        key = f"{vendor_id:04x}:{product_id:04x}"
+        settings["mappings"][key] = mapping
+        with open("simlink.json", "w") as f:
+            json.dump(settings, f, indent=2)
 
 if __name__ == '__main__':
     gui = SimLinkGUI()

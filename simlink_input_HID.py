@@ -86,6 +86,29 @@ class RadiomasterJoystick(InputDevice):
         return None, None, None
 
 
+class GenericHIDDevice(InputDevice):
+    """Generic HID device with user-defined mapping."""
+    def __init__(self, vendor_id, product_id, mapping=None):
+        super().__init__(vendor_id, product_id)
+        self.mapping = mapping or {}  # e.g. {'throttle': {'index': 2, 'min': 0, 'max': 255}, ...}
+
+    def handle_input(self):
+        data = self.read_data(128)
+        if not data or not self.mapping:
+            return None, None, None
+        def get_val(name):
+            info = self.mapping.get(name)
+            if info is None:
+                return None
+            val = int(data[info['index']])
+            # Optionally scale to 0-255 or 0-2560 here if needed
+            return val
+        throttle = get_val('throttle')
+        brake = get_val('brake')
+        steering = get_val('steering')
+        return throttle, brake, steering
+
+
 class InputController:
     """Controller to manage multiple input devices and allow external (GUI) input with smoothing."""
     def __init__(self):
@@ -181,16 +204,37 @@ class InputController:
             # Radiomaster Joystick
             device = RadiomasterJoystick(vendor_id, product_id)
         else:
-            print(f"Unknown device (VID: {vendor_id}, PID: {product_id}), cannot register.")
-            return
+            # Try to load mapping for unknown devices
+            mapping = self.load_device_mapping(vendor_id, product_id)
+            if mapping:
+                device = GenericHIDDevice(vendor_id, product_id, mapping)
+                device.connect()
+                self.devices.append(device)
+                print(f"Generic device registered: VID: {vendor_id}, PID: {product_id}, mapping: {mapping}")
+            else:
+                print(f"Unknown device (VID: {vendor_id}, PID: {product_id}), please calibrate.")
+                # Optionally trigger calibration wizard here
+                return
         device.connect()
         self.devices.append(device)
         print(f"Device registered: VID: {vendor_id}, PID: {product_id}")
         print(f"devices list: {self.devices}")
         self.update_inputs()
 
+    def load_device_mapping(self, vendor_id, product_id):
+        import json
+        try:
+            with open("simlink.json", "r") as f:
+                settings = json.load(f)
+            key = f"{vendor_id:04x}:{product_id:04x}"
+            return settings.get("mappings", {}).get(key)
+        except Exception:
+            return None
+
     def print_inputs(self):
         """Print the current input values."""
+        src = "InputController"
+
         print(f"[{src}] Steering: {self.steering_value}, Throttle: {self.throttle_value}, Brake: {self.brake_value}")
 
 
@@ -205,16 +249,13 @@ if __name__ == "__main__":
     fanatec_pedals.connect()
     simagic_wheel.connect()
     radiomaster_joystick.connect()
-
-    controller.register_device(fanatec_pedals)
-    controller.register_device(simagic_wheel)
-    controller.register_device(radiomaster_joystick)
+    controller.devices.extend([fanatec_pedals, simagic_wheel, radiomaster_joystick])
 
     try:
         while True:
             controller.update_inputs()
             controller.print_inputs()
-            time.sleep(0.1)
+            time.sleep(0.01)
     except KeyboardInterrupt:
         print("Exiting...")
         for device in controller.devices:
