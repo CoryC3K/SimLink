@@ -6,7 +6,7 @@ With any 2x ELRS receivers and a serial adapter, you can use any computer to con
 
 If you want me to work on it, you'll have to tell me. :) coryconger@gmail.com
 
-![SimLink](https://github.com/user-attachments/assets/a3afc9d9-d86f-4e9a-a4aa-ee2b5baaa1e9)
+![SimLink](https://github.com/CoryC3K/SimLink/blob/main/SimLink.png)
 
 # Requirements
 ## Software
@@ -24,6 +24,8 @@ Tested on Linux and Windows. Raspbian & Win10 specifically.
 Assuming you've got your permissions and dependencies and whatnot, you just run `sudo python3 ./simlink_gui.py`
 
 Sudo because USB devices in raspbian are root and I'm too lazy to google the fix. alias please="sudo". Bang bang !!.
+
+Windows: Just run it with python. It's developed on Windows. 
 
 ### To configure the RX's
 ExpressLRS Configurator. One time to setup the TX by checking the "is TX" box.  
@@ -59,8 +61,7 @@ In windows, the `InstanceID` has your VID & PID, be smart and find it: USB\\**VI
 _______
 1. Support for other wheel/pedal/inputs/etc  
 2. Testing  
-...
-6. store reciver ID and settings so the controller can remember zeros/centers and whatnot  
+... 
 7. Other inputs  
 8. Figure out that buzzer I wanted to add
 
