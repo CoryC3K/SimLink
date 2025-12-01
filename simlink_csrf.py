@@ -13,7 +13,8 @@ class ConnectionState(Enum):
     PARAMETERS = auto()
     CONNECTED = auto()
 
-class paramType(Enum):
+class ParamType(Enum):
+    """ Parameter types for CRSF device """
     UINT8 = 0  # deprecated
     INT8 = 1  # deprecated
     UINT16 = 2  # deprecated
@@ -62,11 +63,11 @@ class CRSFParser:
             "param_count": data[idx+12],
             "protocol_version": data[idx+13]
         }
-    
+
     @staticmethod
     def parse_param_value(data: bytearray, param_type: int) -> Any:
         """
-        Parse value of type paramType
+        Parse value of type ParamType
         For types 0x00 - 0x07, value contains multiple fields of the base type T, sent in big endian
 
         T current value
@@ -76,11 +77,11 @@ class CRSFParser:
 
         """
         idx = 0
-        if param_type in [paramType.UINT8.value, paramType.INT8.value]:
+        if param_type in [ParamType.UINT8.value, ParamType.INT8.value]:
             size = 1
-        elif param_type in [paramType.UINT16.value, paramType.INT16.value]:
+        elif param_type in [ParamType.UINT16.value, ParamType.INT16.value]:
             size = 2
-        elif param_type in [paramType.UINT32.value, paramType.INT32.value]:
+        elif param_type in [ParamType.UINT32.value, ParamType.INT32.value]:
             size = 4
         else:
             raise ValueError(f"Unsupported param type: {param_type}")
@@ -223,7 +224,7 @@ class CRSFParser:
         return {
             "list_of_children": list_of_children.split(';')
         }
-    
+
     # @staticmethod
     # def parse_param_info(data: bytearray) -> Dict[str, Any]:
     #     """
@@ -235,7 +236,7 @@ class CRSFParser:
     #         info += chr(data[idx])
     #         idx += 1
     #     return info
-    
+
     # @staticmethod
     # def parse_param_command(data: bytearray) -> Dict[str, Any]:
     #     """
@@ -259,7 +260,7 @@ class CRSFParser:
     @staticmethod
     def parse_common_param_fields(data: bytearray) -> Dict[str, Any]:
         """
-        Parse common parameter fields: 
+        Parse common parameter fields:
         parent_folder, data_type, and name
         """
         idx = 0
@@ -297,24 +298,24 @@ class CRSFParser:
         param_payload = payload[param_info["chunk_header"]["idx"]:]
         pkt_type = param_info["chunk_header"]["type"]
 
-        if pkt_type < paramType.FLOAT.value:
-            print(f"warn{param_info['parameter_number']}: depreciated param type: {paramType(pkt_type).name}")
+        if pkt_type < ParamType.FLOAT.value:
+            print(f"warn{param_info['parameter_number']}: depreciated param type: {ParamType(pkt_type).name}")
             param_info["chunk"] = CRSFParser.parse_param_value(param_payload, pkt_type)
 
-        if pkt_type == paramType.FLOAT.value:
+        if pkt_type == ParamType.FLOAT.value:
             param_info["chunk"] = CRSFParser.parse_param_float(param_payload)
 
-        if pkt_type == paramType.TEXT_SELECTION.value:
+        if pkt_type == ParamType.TEXT_SELECTION.value:
             param_info["chunk"] = CRSFParser.parse_param_text_selection(param_payload)
 
-        if pkt_type == paramType.STRING.value:
+        if pkt_type == ParamType.STRING.value:
             param_info["chunk"] = CRSFParser.parse_param_string(param_payload)
 
-        if pkt_type == paramType.FOLDER.value:
+        if pkt_type == ParamType.FOLDER.value:
             # Weird issue where the folder has no list of children
             param_info["chunk"] = CRSFParser.parse_param_folder(param_payload)
 
-        if pkt_type == paramType.OUT_OF_RANGE.value:
+        if pkt_type == ParamType.OUT_OF_RANGE.value:
             print(f"Out of range parameter: {param_info['parameter_number']}")
             return param_info
         return param_info
@@ -334,14 +335,16 @@ class CRSFDevice:
         self.param_idx = 1
         self.current_chunk = 0
         self.chunk_index = 0
-        self.RC_CHANNELS = [0] * 16
-        self.RC_CHANNELS[0] = 1300 # Steering turn so I know it's alive
+        self.rc_channels = [0] * 16
+        self.rc_channels[0] = 1300 # Steering turn so I know it's alive
         self.steering_device = None
         self.throttle_device = None
-        self.max_throttle = int(1811 - (1811-992)*.5) # 100% throttle is 1811, 0% is 992 1811-992 = 819
+        # 100% throttle is 1811, 0% is 992 1811-992 = 819
+        self.max_throttle = int(1811 - (1811-992)*.5)
         self.max_brake = int(992 - (992-172) * .5) # 100% brake is 172, 0% is 992
         # CRSF packets
-        self.ping_packet = bytearray([0xEE, 0x04, 0x28, 0x00]) # CRSF_FRAMETYPE_DEVICE_PING [sync] [len] [type] [00 = broadcast] [crc8]
+        # CRSF_FRAMETYPE_DEVICE_PING [sync] [len] [type] [00 = broadcast] [crc8] [0x7F = end]
+        self.ping_packet = bytearray([0xEE, 0x04, 0x28, 0x00])
         self.ping_packet.append(CRSFParser.crc8(self.ping_packet) ^ 1 << 1)  # CRC8
         self.ping_packet.append(0x7F)
         self.battery_data = {
@@ -365,6 +368,7 @@ class CRSFDevice:
         self.brake_value = 0
 
     def map(self, x, in_min, in_max, out_min, out_max):
+        """Map value from one range to another"""
         return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
 
     def crsf_battery_sensor(self, data):
@@ -388,8 +392,8 @@ class CRSFDevice:
     def request_link_stats(self):
         """Request link quality stats from CRSF device"""
         self.request_parameter(0x14, 0)  # CRSF_FRAMETYPE_LINK_STATISTICS
-
-        # packet = bytearray([0xEE, 0x06, 0x2C, 0xEE, 0xEA, 0x14, 0x00])  # CRSF_FRAMETYPE_LINK_STATISTICS [sync] [len] [type] [00 EA = extended] [crc8]
+        # CRSF_FRAMETYPE_LINK_STATISTICS [sync] [len] [type] [00 EA = extended] [crc8]
+        # packet = bytearray([0xEE, 0x06, 0x2C, 0xEE, 0xEA, 0x14, 0x00])
         # packet.append(CRSFParser.crc8(packet))
         # self.serial.write(packet)
         print("Requested link stats")
@@ -425,6 +429,8 @@ class CRSFDevice:
         ### WARN ###
         # This is ignoring anything that's not CRSFShot
         # un-comment else to fix it if needed
+
+        # OPENTX Sync: https://github.com/crsf-wg/crsf/wiki/CRSF_FRAMETYPE_RADIO_ID
 
         payload = data[5:-1]  # Skip address, length, type, and CRC
 
@@ -473,18 +479,18 @@ class CRSFDevice:
             return False
 
         # Set CRSF values
-        self.RC_CHANNELS[0] = self.steering_value
+        self.rc_channels[0] = self.steering_value
         if self.brake_value < 992:
-            self.RC_CHANNELS[1] = self.brake_value
+            self.rc_channels[1] = self.brake_value
         else:
-            self.RC_CHANNELS[1] = self.throttle_value # - brake_crsf  # Throttle + Brake
+            self.rc_channels[1] = self.throttle_value # - brake_crsf  # Throttle + Brake
 
         if not self.serial.is_open:
             # Don't bother going further if serial is closed
             return False
 
         # Pack 11-bit channel values into bytes
-        for ch_num, value in enumerate(self.RC_CHANNELS):
+        for value in self.rc_channels:
             buffer |= (value << bits_written)
             bits_written += 11
 
@@ -584,7 +590,7 @@ class CRSFDevice:
                 self.parameters[param_num] = param_info
 
                 #print(f"Param {param_num}:\n\t{param_info['chunk_header']['name']} - {self.parameters[param_num]}")
-            except Exception as e:
+            except (IndexError, ValueError, TypeError, UnicodeDecodeError) as e:
                 print(f"Error parsing parameter {param_num}: {e}")
                 print(f"Raw buff: {raw_param_data}")
                 self.parameters[param_num] = combined_data
@@ -682,12 +688,6 @@ class CRSFDevice:
             print(f"CRC mismatch: {crc:02X} != {data[-1]:02X}")
             return
 
-        try:
-            store = data[2]
-        except IndexError:
-            print(f"Index error[2]: {data}")
-            return
-        
         # CRC, length, sync checks all done, now we can parse the packet
 
         if data[2] == 0x08: # CRSF_FRAMETYPE_BATTERY_SENSOR
@@ -722,7 +722,8 @@ class CRSFDevice:
         now = time.time()
 
         try:
-            if self.tx_state == ConnectionState.CONNECTED and (not self.serial or not self.serial.is_open):
+            if self.tx_state == ConnectionState.CONNECTED and \
+                    (not self.serial or not self.serial.is_open):
                 self.tx_state= ConnectionState.DISCONNECTED
                 print("Error: Serial disconnected while connected")
                 return
@@ -731,7 +732,8 @@ class CRSFDevice:
             return
 
         if now - self.last_tx > self.timeout:
-            if (self.tx_state == ConnectionState.DISCONNECTED) or (self.tx_state == ConnectionState.CONNECTING):
+            if (self.tx_state == ConnectionState.DISCONNECTED) or \
+                    (self.tx_state == ConnectionState.CONNECTING):
                 self.serial.write(self.ping_packet)
                 #print("TXPing:" + " ".join([f"{b:02X}" for b in self.ping_packet]))
                 self.tx_state = ConnectionState.CONNECTING
@@ -775,4 +777,3 @@ class CRSFDevice:
 if __name__ == "__main__":
     print("Go run the GUI")
     exit()
-

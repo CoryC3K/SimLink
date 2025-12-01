@@ -1,5 +1,6 @@
 import time
 import hid
+import json
 
 class InputDevice:
     """Base class for input devices."""
@@ -29,7 +30,7 @@ class InputDevice:
         if self.device:
             try:
                 return self.device.read(size, timeout_ms=1)
-            except Exception as e:
+            except OSError as e:
                 print(f"Error reading device: {e}")
         return None
 
@@ -180,7 +181,6 @@ class InputController:
         self.throttle_value = throttle_avg
         self.brake_value = brake_avg
 
-        #print(f"Updated Inputs - Steering: {self.steering_value}, Throttle: {self.throttle_value}, Brake: {self.brake_value}")
 
     def register_device(self, vendor_id, product_id):
         """Register a new input device."""
@@ -196,39 +196,40 @@ class InputController:
         print(f"Registering device VID: {vendor_id}, PID: {product_id}")
         if vendor_id == 0xeb7:
             # Fanatec Pedals
-            device = FanatecPedals(vendor_id, product_id)
+            reg_dev = FanatecPedals(vendor_id, product_id)
         elif vendor_id == 0x483:
             # Simagic Wheel
-            device = SimagicWheel(vendor_id, product_id)
+            reg_dev = SimagicWheel(vendor_id, product_id)
         elif vendor_id == 0x1209:
             # Radiomaster Joystick
-            device = RadiomasterJoystick(vendor_id, product_id)
+            reg_dev = RadiomasterJoystick(vendor_id, product_id)
         else:
             # Try to load mapping for unknown devices
             mapping = self.load_device_mapping(vendor_id, product_id)
             if mapping:
-                device = GenericHIDDevice(vendor_id, product_id, mapping)
-                device.connect()
-                self.devices.append(device)
+                reg_dev = GenericHIDDevice(vendor_id, product_id, mapping)
+                reg_dev.connect()
+                self.devices.append(reg_dev)
                 print(f"Generic device registered: VID: {vendor_id}, PID: {product_id}, mapping: {mapping}")
             else:
                 print(f"Unknown device (VID: {vendor_id}, PID: {product_id}), please calibrate.")
                 # Optionally trigger calibration wizard here
                 return
-        device.connect()
-        self.devices.append(device)
+        reg_dev.connect()
+        self.devices.append(reg_dev)
         print(f"Device registered: VID: {vendor_id}, PID: {product_id}")
         print(f"devices list: {self.devices}")
         self.update_inputs()
 
     def load_device_mapping(self, vendor_id, product_id):
-        import json
+        """Load device mapping from simlink.json for generic HID devices."""
         try:
-            with open("simlink.json", "r") as f:
+            with open("simlink.json", "r", encoding="utf-8") as f:
                 settings = json.load(f)
             key = f"{vendor_id:04x}:{product_id:04x}"
             return settings.get("mappings", {}).get(key)
-        except Exception:
+        except OSError as e:
+            print(f"Error loading device mappings: {e}")
             return None
 
     def print_inputs(self):
@@ -252,6 +253,7 @@ if __name__ == "__main__":
     controller.devices.extend([fanatec_pedals, simagic_wheel, radiomaster_joystick])
 
     try:
+        # Just print the inputs to console
         while True:
             controller.update_inputs()
             controller.print_inputs()

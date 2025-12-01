@@ -36,7 +36,7 @@ class SerialManager:
         if not self.serial:
             return False
         try:
-            self.serial.in_waiting
+            _ = self.serial.in_waiting
             return self.serial.is_open
         except serial.SerialException:
             return False

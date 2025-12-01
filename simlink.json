@@ -1,0 +1,10 @@
+{
+  "gui": {
+    "steering_device": "Radiomaster Pocket Joystick (VID: 0x1209, PID: 0x4f54)",
+    "throttle_device": "Radiomaster Pocket Joystick (VID: 0x1209, PID: 0x4f54)",
+    "com_port": "COM3 - Silicon Labs CP210x USB to UART Bridge (COM3)",
+    "throttle_scale": 50.0,
+    "brake_scale": 50.0,
+    "max_steer_scale": 50.0
+  }
+}

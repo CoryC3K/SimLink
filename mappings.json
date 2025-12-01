@@ -1,0 +1,34 @@
+{
+    "mappings": {
+        "0x483": {
+            "0x522": {
+                "name": "SIMAGIC Alpha Mini (VID: 0x483, PID: 0x522)",
+                "axes": {
+                    "steering": {
+                        "index": 1,
+                        "min": 109,
+                        "max": 123
+                    }
+                }
+            }
+        },
+        "0xeb7": {
+            "0x1a95": {
+                "name": "ClubSport USB Pedal (VID: 0xeb7, PID: 0x1a95)",
+                "axes": {}
+            }
+        },
+        "0x1209": {
+            "0x4f54": {
+                "name": "Radiomaster Pocket Joystick (VID: 0x1209, PID: 0x4f54)",
+                "axes": {
+                    "steering": {
+                        "index": 3,
+                        "min": 2,
+                        "max": 4
+                    }
+                }
+            }
+        }
+    }
+}
