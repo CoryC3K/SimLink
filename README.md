@@ -6,7 +6,7 @@ With any 2x ELRS receivers and a serial adapter, you can use any computer to con
 
 If you want me to work on it, you'll have to tell me. :) coryconger@gmail.com
 
-![SimLink](https://github.com/CoryC3K/SimLink/blob/main/SimLink.png)
+![SimLink](https://github.com/CoryC3K/SimLink/blob/main/SimLink.png?raw=true )
 
 # Requirements
 ## Software
