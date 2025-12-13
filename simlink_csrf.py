@@ -328,7 +328,9 @@ class CRSFDevice:
         self.rx_state= ConnectionState.DISCONNECTED
         self.serial = serial_obj
         self.last_tx = 0
-        self.timeout = 0.005  # 50ms timeout
+        # Reduce timeout to allow faster serial transmissions (smaller = faster)
+        # Be cautious: some devices/drivers may not handle extremely high rates.
+        self.timeout = 0.0025  # 2.5ms timeout (~400 Hz)
         self.device_info: Dict[str, Any] = {}
         self.parameters: Dict[int, Dict[str, Any]] = {}
         self.param_buff = {}
@@ -366,6 +368,8 @@ class CRSFDevice:
         self.steering_value = 0
         self.throttle_value = 0
         self.brake_value = 0
+        # RX assembly buffer for incremental parsing of serial stream
+        self._rx_buffer = bytearray()
 
     def map(self, x, in_min, in_max, out_min, out_max):
         """Map value from one range to another"""
@@ -632,19 +636,19 @@ class CRSFDevice:
         # Extended packet format
         # [sync] [len] [type] [[ext dest] [ext src] [payload]] [crc8]
 
-        # This breaks a lot doing a read, hence try/catch
+        # Read available bytes and append to incremental RX buffer. Then parse complete frames out of the buffer.
         try:
             if not self.serial or not self.serial.is_open:
                 return
 
-            if self.serial.in_waiting < 5:
+            if self.serial.in_waiting < 1:
                 return
 
             raw_data = self.serial.read(self.serial.in_waiting)
-            #print("RX:", " ".join([f"{b:02X}" for b in raw_data]))
-            # Mutable copy
-            data = bytearray(raw_data)
-
+            if not raw_data:
+                return
+            # Append to assembly buffer
+            self._rx_buffer.extend(raw_data)
         except serial.SerialException as e:
             print(f"Serial error: {e}")
             return
@@ -652,63 +656,87 @@ class CRSFDevice:
             print(f"OS error: {e}")
             return
 
-        # Now that we're safe...
+        # Now try to extract as many full frames as possible
+        VALID_SYNC = {0x00, 0xEA, 0x0C, 0xC8}
+        while True:
+            # Need at least 3 bytes for sync, len, and type
+            if len(self._rx_buffer) < 3:
+                break
 
-        rcvd_len = len(data) - 2 # Exclude sync byte and length byte
-        if rcvd_len < 1: # Frame size must be at least 1 byte
-            print("Invalid packet, no data")
-            return
+            # If first byte isn't a valid sync, drop until we find one
+            if self._rx_buffer[0] not in VALID_SYNC:
+                # Find next possible sync byte
+                idx = None
+                for i in range(1, len(self._rx_buffer)):
+                    if self._rx_buffer[i] in VALID_SYNC:
+                        idx = i
+                        break
+                if idx is None:
+                    # No sync found, dump whole buffer
+                    print(f"Dropping {len(self._rx_buffer)} bytes of garbage: {' '.join([f'{b:02X}' for b in self._rx_buffer])}")
+                    self._rx_buffer.clear()
+                    break
+                else:
+                    # Discard preceding bytes
+                    if idx > 0:
+                        print(f"Discarding {idx} bytes before sync: {' '.join([f'{b:02X}' for b in self._rx_buffer[:idx]])}")
+                        del self._rx_buffer[:idx]
+                    # continue loop to re-evaluate
+                    continue
 
-        # Verify sync byte is device address or:
-        # Serial sync byte: 0xC8; Broadcast device address: 0x00;
-        # 0xEA Remote Control
-        # 0xEC R/C Receiver / Crossfire Rx
-        # 0xEE R/C Transmitter Module / Crossfire Tx
-        if data[0] not in [0x00, 0xEA, 0x0C, 0xC8]:
-            print(f"Unknown Sync type: {data[0]:02X}, raw: {' '.join([f'{b:02X}' for b in data])}")
-            return
+            # Now we have sync at buffer[0]
+            expected_len = self._rx_buffer[1]
+            full_len = expected_len + 2  # frame size includes sync and length bytes
 
-        # Frame length:
-        # number of bytes in the frame excluding Sync byte
-        # and Frame Length (basically, entire frame size -2)
+            # If we don't yet have the whole frame, wait for more data
+            if len(self._rx_buffer) < full_len:
+                break
 
-        expected_len = data[1] # Frame length
-        if rcvd_len != expected_len or len(data) > 64: # CRSF hard limit of 64 bytes
-            # Truncate data to expected length
-            if len(data) > expected_len + 2:
-                print(f"ERR:trimmed: len[{len(data)}>{expected_len}]: {' '.join([f'{b:02X}' for b in data])}")
-                data = data[:expected_len + 2]
-            else:
-                print(f"ERR: len[{len(data)}!={expected_len}]: {' '.join([f'{b:02X}' for b in data])}")
-                return
+            # Extract one full frame
+            frame = bytes(self._rx_buffer[:full_len])
+            # Remove from buffer
+            del self._rx_buffer[:full_len]
 
-        # CRC is calculated over all bytes except CRC itself
-        crc = CRSFParser.crc8(data[:-1])
-        if crc != data[-1]:
-            print(f"CRC mismatch: {crc:02X} != {data[-1]:02X}")
-            return
+            # Sanity check frame length
+            if len(frame) > 64:
+                print(f"ERR: frame too long ({len(frame)}), discarding: {' '.join([f'{b:02X}' for b in frame])}")
+                continue
 
-        # CRC, length, sync checks all done, now we can parse the packet
+            # Verify CRC
+            crc = CRSFParser.crc8(frame[:-1])
+            if crc != frame[-1]:
+                print(f"CRC mismatch: {crc:02X} != {frame[-1]:02X} -- frame: {' '.join([f'{b:02X}' for b in frame])}")
+                continue
 
-        if data[2] == 0x08: # CRSF_FRAMETYPE_BATTERY_SENSOR
-            self.crsf_battery_sensor(data)
-        elif data[2] == 0x14: # CRSF_FRAMETYPE_LINK_STATISTICS
-            self.crsf_link_statistics(data)
-        elif data[2] == 0x16: # RC_CHANNELS_PACKED
-            self.crsf_rc_channels_packed(data)
+            # We have a validated frame, parse it
+            data = bytearray(frame)
+            if len(data) < 3:
+                print(f"Invalid/short packet after validation: len={len(data)} raw={' '.join([f'{b:02X}' for b in data])}")
+                continue
 
-        # Above 0x27 is extended frametype, different packet format!!!
+            if data[2] == 0x08: # CRSF_FRAMETYPE_BATTERY_SENSOR
+                self.crsf_battery_sensor(data)
+                continue
+            if data[2] == 0x14: # CRSF_FRAMETYPE_LINK_STATISTICS
+                self.crsf_link_statistics(data)
+                continue
+            if data[2] == 0x16: # RC_CHANNELS_PACKED
+                self.crsf_rc_channels_packed(data)
+                continue
 
-        elif data[2] == 0x29:  # Device Info, also ping response
-            # If we're in connecting state, a ping response means we're connected
-            if self.tx_state== ConnectionState.CONNECTING:
-                self.tx_state= ConnectionState.PARAMETERS
-            self.device_info = CRSFParser.parse_device_info(data)
-        elif data[2] == 0x2B:  # Parameter data
-            self.crsf_parameter_settings(data)
-        elif data[2] == 0x3A: #CRSF_FRAMETYPE_RADIO_ID
-            self.crsf_radio_id(data)
-        else:
+            # Above 0x27 is extended frametype, different packet format!!!
+            if data[2] == 0x29:  # Device Info, also ping response
+                if self.tx_state == ConnectionState.CONNECTING:
+                    self.tx_state = ConnectionState.PARAMETERS
+                self.device_info = CRSFParser.parse_device_info(data)
+                continue
+            if data[2] == 0x2B:  # Parameter data
+                self.crsf_parameter_settings(data)
+                continue
+            if data[2] == 0x3A: #CRSF_FRAMETYPE_RADIO_ID
+                self.crsf_radio_id(data)
+                continue
+
             print(f"Unhandled frame type: {data[2]:02X}")
 
 
