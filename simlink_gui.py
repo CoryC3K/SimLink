@@ -14,6 +14,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import hid
 import serial
+import traceback
 from simlink_csrf import CRSFDevice, ConnectionState
 from simlink_input_HID import InputController, GenericHIDDevice
 from simlink_serial import SerialManager
@@ -28,8 +29,16 @@ class SimLinkGUI:
 
         self.root = tk.Tk()
         self.root.title('SimLink CRSF TX GUI')
+        # Input update rate and last-run timestamp (seconds)
+        # Increase input sampling to 100 Hz for faster updates
+        self.input_update_interval = 0.01  # 100 Hz
+        self.last_input_update = time.time()
         self.queue = queue.Queue()
         self.param_queue = queue.Queue()
+        # Pending parameter chunks buffer and throttle settings
+        self._pending_param_chunks = []
+        self._last_params_update = 0.0
+        self.param_update_interval = 0.5  # seconds, throttle parameter UI updates
         self.running = True
         self.crsf_tx = None
         self.serial_manager = SerialManager()
@@ -37,7 +46,7 @@ class SimLinkGUI:
         self.steer_val_disp = tk.StringVar(value='Steering: --')
         self.throttle_val_disp = tk.StringVar(value='Throttle: --')
         self.brake_val_disp = tk.StringVar(value='   Brake: --')
-        self.serial_status = tk.StringVar(value='PC->TX: Disconnected')
+        self.serial_status = tk.StringVar(value='PC->TX Link: Disconnected')
         self.conn_status = tk.StringVar(value='TX->RX: N/A')
         self.battery_var = tk.StringVar(value='Battery: --')
         self.link_var = tk.StringVar(value='Link: --')
@@ -46,6 +55,26 @@ class SimLinkGUI:
         # Initialize InputController
         self.input_controller = InputController()
         #self.init_input_devices()
+
+        # Define a fixed list of 15 parameter definitions (name + known options).
+        # Users can edit these defaults to match their TX if needed.
+        self.param_defs = {
+            1:  {'name': 'TX pwr', 'options': ['10mw', '25mw', '100mw']},
+            2:  {'name': 'RF Mode', 'options': ['LR', 'CR', 'PR']},
+            3:  {'name': 'Channel Plan', 'options': ['A', 'B', 'C']},
+            4:  {'name': 'Telemetry', 'options': ['Off', 'On']},
+            5:  {'name': 'Failsafe', 'options': ['Hold', 'Zero', 'Custom']},
+            6:  {'name': 'Binding', 'options': ['Start', 'Stop']},
+            7:  {'name': 'Antenna Gain', 'options': ['Low', 'Med', 'High']},
+            8:  {'name': 'Beacon', 'options': ['Off', 'On']},
+            9:  {'name': 'Beacon Interval', 'options': ['1s', '2s', '5s']},
+            10: {'name': 'RSSI Scale', 'options': ['Auto', 'Manual']},
+            11: {'name': 'Link Quality', 'options': ['Low', 'Normal', 'High']},
+            12: {'name': 'Power Save', 'options': ['Off', 'On']},
+            13: {'name': 'Channel Mask', 'options': ['Default', 'Custom']},
+            14: {'name': 'LED Mode', 'options': ['Off', 'Blink', 'Solid']},
+            15: {'name': 'Debug Level', 'options': ['0', '1', '2', '3']},
+        }
 
         # Track which devices were explicitly selected by user or loaded from settings
         self.user_selected_steering = False
@@ -88,15 +117,26 @@ class SimLinkGUI:
         top_row_frame = ttk.Frame(right_container)
         top_row_frame.pack(fill='x', padx=0, pady=(0, 5))
 
+        # Serial connection frame
+        self.serial_frame = ttk.LabelFrame(top_row_frame, text="Serial Connection")
+        # Pack to the left so Serial, Status and Channel Values share the top row and can expand
+        self.serial_frame.pack(fill='x', padx=5, pady=5)
+        self.port_combo = ttk.Combobox(self.serial_frame, state="readonly")
+        self.refresh_ports()
+        self.port_combo.pack(expand=True, fill='x', side='left', padx=(0,5))
+
+        self.connect_btn = ttk.Button(self.serial_frame, text='Connect', command=self.toggle_connection)
+        self.connect_btn.pack(side='left', pady=5)
+
         # ELRS TX Status
         status_frame = ttk.LabelFrame(top_row_frame, text="Status")
         status_frame.pack(side='left', fill='both', expand=True, padx=(0, 5))
 
         ttk.Label(status_frame, textvariable=self.serial_status, anchor='w').pack(pady=2, fill='x')
         ttk.Label(status_frame, textvariable=self.conn_status, anchor='w').pack(pady=2, fill='x')
-        ttk.Label(status_frame, textvariable=self.battery_var, anchor='w').pack(pady=2, fill='x')
         self.link_label = tk.Label(status_frame, textvariable=self.link_var, width=40, anchor='w')
         self.link_label.pack(pady=2, fill='x')
+        ttk.Label(status_frame, textvariable=self.battery_var, anchor='w').pack(pady=2, fill='x')
 
         # Channel values display
         values_frame = ttk.LabelFrame(top_row_frame, text="Channel Values")
@@ -105,33 +145,33 @@ class SimLinkGUI:
         # Create a new frame for throttle and brake labels to stack them vertically
         values_inner_frame = ttk.Frame(values_frame)
         values_inner_frame.pack(fill='x', pady=2)
-        ttk.Label(values_inner_frame, textvariable=self.steer_val_disp).pack(fill='x', pady=2)
-        ttk.Label(values_inner_frame, textvariable=self.throttle_val_disp).pack(fill='x', pady=2)
-        ttk.Label(values_inner_frame, textvariable=self.brake_val_disp).pack(fill='x', pady=2)
+        ttk.Label(values_inner_frame, textvariable=self.steer_val_disp).pack(fill='x', pady=2, padx=5)
+        ttk.Label(values_inner_frame, textvariable=self.throttle_val_disp).pack(fill='x', pady=2, padx=5)
+        ttk.Label(values_inner_frame, textvariable=self.brake_val_disp).pack(fill='x', pady=2, padx=5)
 
         # Parameters frame
         self.params_frame = ttk.LabelFrame(right_container, text="ELRS Parameters")
         self.params_frame.pack(fill='both', expand=True, padx=0, pady=0)
+        
 
-        self.params_text = tk.Text(
-            self.params_frame,
-            width=40,
-            height=10,
-            state='disabled',
-            wrap='word')
-        self.params_text.pack(fill='both', expand=True, padx=5, pady=5)
+        # Parameters frame header (static)
+        # No hide/show toggle — parameters are always shown
 
-        self.update_params_btn = ttk.Button(
-            self.params_frame, text='Update Parameters', command=self.update_parameters)
-        self.update_params_btn.pack(pady=5)
+        # Parameters area: plain inner frame. Pre-create rows for static display.
+        self.params_inner = ttk.Frame(self.params_frame)
+        self.params_inner.pack(fill='both', expand=True, padx=2, pady=(5,2))
 
-        # Serial connection frame
-        self.port_combo = ttk.Combobox(conn_frame)
-        self.refresh_ports()
-        self.port_combo.pack(side='left', expand=True, fill='x', padx=(0,5))
+        # Keep track of parameter widgets to update values later
+        self.param_widgets = {}  # param_number -> {'label': Label, 'value': Label}
+        # Flag set when user requests a parameters refresh; controls when GUI list is cleared
+        self.params_clear_on_next = False
 
-        self.connect_btn = ttk.Button(conn_frame, text='Connect', command=self.toggle_connection)
-        self.connect_btn.pack(side='right')
+        # Pre-create 15 parameter rows (label + value) so the UI always shows a simple list
+        self._create_param_rows()
+
+        # Place the update button at the bottom of the params frame (always visible)
+        self.update_params_btn = ttk.Button(self.params_frame, text='Update Parameters', command=self.update_parameters)
+        self.update_params_btn.pack(side='bottom', anchor='e', padx=5, pady=4)
 
         # HID Device selectors
         hid_frame = ttk.LabelFrame(self.root, text="HID Device Selection")
@@ -172,7 +212,7 @@ class SimLinkGUI:
         # Max Brake Frame
         brake_frame = ttk.Frame(control_frame)
         brake_frame.pack(fill='x', padx=5)
-        ttk.Label(brake_frame, text="Max Brake:  ").pack(side='left', padx=5)
+        ttk.Label(brake_frame, text="Max Brake:").pack(side='left', padx=5)
         self.brake_value_label = ttk.Label(brake_frame, text="50%")
         self.brake_value_label.pack(side='right', padx=5)
         self.brake_scale = ttk.Scale(
@@ -199,7 +239,7 @@ class SimLinkGUI:
             command=self.update_max_steer
         )
         self.max_steer_scale.set(50)  # Default 50%
-        self.max_steer_scale.pack(fill='x', expand=True, padx=5)
+        self.max_steer_scale.pack(fill='x', expand=True, padx=5)        
 
         # Add charts frame
         charts_frame = ttk.LabelFrame(self.root, text="Input Charts")
@@ -228,6 +268,8 @@ class SimLinkGUI:
         self.steering_chart = tk.Canvas(steering_frame, width=200, height=20, bg='white')
         self.steering_chart.pack(side='left', fill='x', expand=True, padx=5)
 
+    # Parameters are always visible now; hide/show removed
+
     def refresh_ports(self):
         """Refresh available COM ports with descriptions"""
         # Get list of (port, description) tuples from serial_manager
@@ -254,10 +296,22 @@ class SimLinkGUI:
         if self.serial_manager.has_new_ports():
             self.refresh_ports()
 
-        if self.crsf_tx and not self.serial_manager.is_connected():
-            self.crsf_tx = None
+        # Ensure the Connect/Disconnect button reflects actual connection state
+        try:
+            connected = self.serial_manager.is_connected()
+        except Exception:
+            connected = False
+
+        if connected:
+            # If serial manager reports connected, show Disconnect and update status
+            self.connect_btn['text'] = 'Disconnect'
+        else:
             self.connect_btn['text'] = 'Connect'
-            self.serial_status.set('PC->TX: Disconnected')
+            self.serial_status.set('PC->TX Link: Disconnected')
+
+        # If we previously had a CRSF device but the serial connection dropped, clear it
+        if self.crsf_tx and not connected:
+            self.crsf_tx = None
 
         self.root.after(1000, self.check_serial_status)
 
@@ -274,7 +328,6 @@ class SimLinkGUI:
                     self.crsf_tx = CRSFDevice(self.serial_manager.serial)
                     self.crsf_tx.tx_state = ConnectionState.CONNECTING
                     self.connect_btn['text'] = 'Disconnect'
-                    self.serial_status.set('PC->TX: Connecting')
             except (OSError, serial.SerialException) as e:
                 # Catch OS and serial-specific errors only to avoid swallowing unexpected exceptions
                 self.serial_status.set(f'USB TX Error: {str(e)}')
@@ -283,7 +336,7 @@ class SimLinkGUI:
             self.serial_manager.disconnect()
             self.crsf_tx = None
             self.connect_btn['text'] = 'Connect'
-            self.serial_status.set('PC->TX: Disconnected')
+            self.serial_status.set('PC->TX Link: Disconnected')
 
     def update_link_color(self, link_quality: int):
         """ Update link quality color """
@@ -300,10 +353,7 @@ class SimLinkGUI:
 
     def update_parameters_display(self, param):
         """ Update parameters display """
-
-        self.params_text.config(state='normal')
-
-        # Check if the parameter data is valid
+        # Validate
         if not isinstance(param, dict):
             print(f"Invalid parameter data: {param}")
             return
@@ -317,29 +367,107 @@ class SimLinkGUI:
             print(f"Invalid parameter chunk: {param}")
             return
 
-        out_str = f'{param["parameter_number"]}:{param["chunk_header"]["name"]} = '
-        #print(f"Param: {param['parameter_number']} = {val_idx}\n{param['chunk']['options']}")
-        #print(f"Param: {param['parameter_number']} = {param['chunk']['options'][val_idx]}")
-        if 'options' in param["chunk"] and 'value' in param["chunk"]:
-            val_idx = int(param["chunk"]["value"])
-            out_str += f"\t{param['chunk']['options'][val_idx]}\n"
+        pnum = int(param["parameter_number"])
+        name = param["chunk_header"]["name"]
+        chunk = param["chunk"]
 
-        # Clear the text box if this is the first parameter
+        # If requested, clear the current parameter values when parameter 1 arrives
+        try:
+            if getattr(self, 'params_clear_on_next', False) and pnum == 1:
+                for pw in self.param_widgets.values():
+                    try:
+                        if 'value' in pw and pw['value'] is not None:
+                            pw['value'].config(text='--')
+                    except Exception:
+                        pass
+                self.params_clear_on_next = False
+        except Exception:
+            pass
 
-        if param["parameter_number"] == 1:
-            self.params_text.delete(1.0, tk.END)
+        # Ensure a row exists for this parameter (create on-demand)
+        if pnum not in self.param_widgets:
+            # If inner frame hasn't been created yet, ensure it exists
+            if not hasattr(self, 'params_inner'):
+                self.params_inner = ttk.Frame(self.params_frame)
+                self.params_inner.pack(fill='both', expand=True, padx=2, pady=(5,2))
+            row = ttk.Frame(self.params_inner)
+            row.pack(fill='x', padx=2, pady=1)
+            lbl = ttk.Label(row, text=f"{pnum}: {name}", anchor='w')
+            lbl.pack(side='left', fill='x', expand=True)
+            # Use a simple label for values (no dropdown) to reduce UI overhead
+            val_lbl = ttk.Label(row, text='--', anchor='e')
+            val_lbl.pack(side='right')
+            self.param_widgets[pnum] = {'label': lbl, 'value': val_lbl}
 
-        self.params_text.insert(tk.END, out_str)
-        self.params_text.config(state='disabled')
+        # Update existing row (value shown in a simple label)
+        widgets = self.param_widgets[pnum]
+        # Prefer the static name from param_defs if present; otherwise strip any
+        # parenthetical suffix from the incoming name.
+        static_name = self.param_defs.get(pnum, {}).get('name')
+        if static_name:
+            widgets['label'].config(text=f"{pnum}: {static_name}")
+        else:
+            display_name = name.partition(' (')[0].strip()
+            widgets['label'].config(text=f"{pnum}: {display_name}")
+        # Update the value label (no dropdowns)
+        value_label = widgets.get('value')
+        options = chunk.get('options') if isinstance(chunk.get('options'), (list, tuple)) else None
+        if options:
+            try:
+                val_idx = int(chunk.get('value', 0))
+                if 0 <= val_idx < len(options):
+                    display_val = options[val_idx]
+                else:
+                    display_val = options[0] if options else '--'
+            except Exception:
+                display_val = options[0] if options else '--'
+        else:
+            val = chunk.get('value', '')
+            display_val = str(val)
+        try:
+            if value_label:
+                value_label.config(text=display_val)
+        except Exception:
+            pass
 
     def update_parameters(self):
         """ Request parameters update """
         if self.crsf_tx:
+            # Mark that the next incoming parameter 1 should clear the UI list
+            self.params_clear_on_next = True
             self.crsf_tx.parameters = {}
             self.crsf_tx.param_idx = 0
             self.crsf_tx.current_chunk = 0
             self.crsf_tx.tx_state = ConnectionState.PARAMETERS
             self.crsf_tx.request_parameter(0)
+
+    def _create_param_rows(self):
+        """Create the default 15 parameter rows inside params_inner lazily."""
+        try:
+            # Ensure inner frame exists and is empty
+            if not hasattr(self, 'params_inner') or self.params_inner is None:
+                self.params_inner = ttk.Frame(self.params_frame)
+            # Create rows only if none exist
+            for i in range(1, 16):
+                if i in self.param_widgets:
+                    continue
+                row = ttk.Frame(self.params_inner)
+                row.pack(fill='x', padx=2, pady=1)
+                pname = self.param_defs.get(i, {}).get('name', f"{i}: --")
+                label_text = f"{i}: {pname}" if isinstance(pname, str) else f"{i}: --"
+                lbl = ttk.Label(row, text=label_text, anchor='w')
+                lbl.pack(side='left', fill='x', expand=True)
+                opts = self.param_defs.get(i, {}).get('options', None)
+                if opts and isinstance(opts, (list, tuple)) and len(opts) > 0:
+                    default = opts[0]
+                else:
+                    default = '--'
+                # Use a simple label for value display instead of a Combobox to reduce UI load
+                val_lbl = ttk.Label(row, text=default, anchor='e')
+                val_lbl.pack(side='right')
+                self.param_widgets[i] = {'label': lbl, 'value': val_lbl}
+        except Exception as e:
+            print(f"Failed to create parameter rows: {e}")
 
     # Note: These only cap the OUTPUT value
     #  it should use the inputs full range
@@ -383,14 +511,38 @@ class SimLinkGUI:
         except queue.Empty:
             pass
 
+        # Collect any incoming parameter chunks but throttle UI updates
         try:
-            p_data = self.param_queue.get(block=False)
-            if p_data:
-                for p in p_data:
-                    if p is not None:
-                        self.update_parameters_display(p)
+            while True:
+                p_data = self.param_queue.get(block=False)
+                if p_data:
+                    # p_data is a list of param dicts
+                    for p in p_data:
+                        if p is not None:
+                            self._pending_param_chunks.append(p)
+                else:
+                    break
         except queue.Empty:
             pass
+
+        # Process pending parameter chunks at most once per param_update_interval
+        now = time.time()
+        if (now - self._last_params_update) >= self.param_update_interval and self._pending_param_chunks:
+            # Deduplicate by parameter_number, keep newest per number
+            latest = {}
+            try:
+                for chunk in self._pending_param_chunks:
+                    pnum = int(chunk.get('parameter_number', -1))
+                    if pnum >= 0:
+                        latest[pnum] = chunk
+                # Update display for each parameter in numeric order
+                for pnum in sorted(latest.keys()):
+                    self.update_parameters_display(latest[pnum])
+            except Exception:
+                pass
+            # Clear pending buffer and update timestamp
+            self._pending_param_chunks.clear()
+            self._last_params_update = now
 
         # Update channel values
         self.update_input_display()
@@ -427,20 +579,21 @@ class SimLinkGUI:
             self.update_input_display()
 
         else:
-            self.serial_status.set('PC->TX: Disconnected')
+            self.serial_status.set('PC->TX Link: Disconnected')
             self.conn_status.set('TX->RX: N/A')
             self.battery_var.set('Battery: --')
             self.link_var.set('Link: --')
             self.update_link_color(0)
 
-        self.root.after(10, self.update_gui) # Update every 1ms
+        # Update GUI at ~60 Hz for smoother/ faster UI updates
+        self.root.after(16, self.update_gui) # ~16ms -> ~60Hz
 
     def update_input_display(self):
         """ Update input display """
         if self.crsf_tx is not None:
-            self.steer_val_disp.set(f'Steering: {self.crsf_tx.steering_value}')
-            self.throttle_val_disp.set(f'Throttle: {self.crsf_tx.throttle_value}')
-            self.brake_val_disp.set(f'Brake: {self.crsf_tx.brake_value}')
+            self.steer_val_disp.set(f'St: {self.crsf_tx.steering_value}')
+            self.throttle_val_disp.set(f'Th: {self.crsf_tx.throttle_value}')
+            self.brake_val_disp.set(f'Br: {self.crsf_tx.brake_value}')
 
         # Update throttle chart
         self.throttle_chart.delete('all')
@@ -596,10 +749,11 @@ class SimLinkGUI:
         """
 
         while self.running:
-            # Tell the input controller to get new values
-            # Always run it when connected to allow UI updates
-            if self.input_controller is not None:
+            now = time.time()
+            # Rate-limit input updates to configured interval
+            if self.input_controller is not None and (now - self.last_input_update) >= self.input_update_interval:
                 self.input_controller.update_inputs()
+                self.last_input_update = now
 
             if self.crsf_tx is not None:
                 try:
@@ -644,24 +798,40 @@ class SimLinkGUI:
                     print("Queue full, skipping update")
 
                 except Exception as e:
+                    # Print full traceback for easier debugging of connection issues
+                    print("Exception in controller_loop:", e)
+                    traceback.print_exc()
+                    # Clear CRSF device reference
                     self.crsf_tx = None
-                    self.serial_status.set('PC->TX: Disconnected')
-                    self.queue.put(('update_status', {
-                        'status': f'USB Error: {str(e)}',
-                        'battery': 'Battery: --',
-                        'link': 'Link: --'
-                    }))
+                    # Update UI status safely
+                    try:
+                        self.serial_status.set('PC->TX Link: Disconnected')
+                    except Exception:
+                        pass
+                    # Notify GUI of the error without risking additional exceptions
+                    try:
+                        self.queue.put(('update_status', {
+                            'status': f'USB Error: {str(e)}',
+                            'battery': 'Battery: --',
+                            'link': 'Link: --'
+                        }))
+                    except Exception:
+                        pass
 
             else:
+                # When no CRSF TX is connected, update status less frequently and sleep more to save CPU
                 if time.time() % 1 < 1e-3: # Refresh every second
-                    self.queue.empty()
+                    try:
+                        self.queue.get_nowait()
+                    except queue.Empty:
+                        pass
                     self.queue.put(('update_status', {
                         'status': 'TX Disconnected',
                         'battery': 'Battery: --',
                         'link': 'Link: --'
                     }))
-                    print("No CRSF TX connected")
-            time.sleep(0.001)
+                    # print("No CRSF TX connected")
+                time.sleep(0.02)
 
     def decode_param(self, param):
         """ Decode a single parameter """
@@ -674,9 +844,8 @@ class SimLinkGUI:
             return None
         if 'chunk' not in param:
             return None
-        if 'options' not in param["chunk"] or 'value' not in param["chunk"]:
-            return None
-
+        # Accept parameters even if they don't have 'options' or 'value' fields;
+        # the UI will show a label for the value when options are absent.
         return param
 
     def save_settings(self):
@@ -710,6 +879,7 @@ class SimLinkGUI:
         gui_settings["throttle_scale"] = self.throttle_scale.get()
         gui_settings["brake_scale"] = self.brake_scale.get()
         gui_settings["max_steer_scale"] = self.max_steer_scale.get()
+        # No params visibility state to save (parameters always visible)
 
         output_json["gui"] = gui_settings
 
@@ -751,6 +921,7 @@ class SimLinkGUI:
                 self.brake_scale.set(gui_settings["brake_scale"])
             if "max_steer_scale" in gui_settings:
                 self.max_steer_scale.set(gui_settings["max_steer_scale"])
+            # Parameters are always visible; no visibility state to restore
             print(f"Settings loaded from {self.simlink_json}")
         except (json.JSONDecodeError, IOError, KeyError, ValueError) as e:
             print(f"Failed to load settings: {e}")
@@ -759,8 +930,35 @@ class SimLinkGUI:
         """ Close window """
         self.save_settings()
         self.running = False
+
+        # Close CRSF device serial if present
         if self.crsf_tx:
-            self.crsf_tx.serial.close()
+            ser = getattr(self.crsf_tx, 'serial', None)
+            if ser is not None:
+                # Only attempt operations if the serial object appears open
+                is_open = getattr(ser, 'is_open', None)
+                if is_open:
+                    # Use specific exception handling for serial ops
+                    try:
+                        if hasattr(ser, 'flush'):
+                            ser.flush()
+                    except (serial.SerialException, OSError) as e:
+                        print(f"Warning: serial flush failed: {e}")
+                    try: 
+                        if hasattr(ser, 'close'):
+                            ser.close()
+                    except (serial.SerialException, OSError) as e:
+                        print(f"Warning: serial close failed: {e}")
+            # Drop reference to CRSF device
+            self.crsf_tx = None
+
+        # Ask SerialManager to disconnect (if implemented)
+        if hasattr(self.serial_manager, 'disconnect'):
+            try:
+                self.serial_manager.disconnect()
+            except (serial.SerialException, OSError) as e:
+                print(f"Warning: SerialManager.disconnect() failed: {e}")
+
         self.root.quit()
 
     def has_device_mapping(self, vendor_id, product_id):
