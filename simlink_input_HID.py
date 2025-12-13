@@ -1,6 +1,7 @@
 import time
 import hid
 import json
+import threading
 
 class InputDevice:
     """Base class for input devices."""
@@ -48,13 +49,78 @@ class InputDevice:
 
 class FanatecPedals(InputDevice):
     """Fanatec ClubSport Pedals."""
+    def connect(self):
+        """Open device and start a reader thread that caches latest report."""
+        try:
+            # Open HID device (use blocking reads in the thread)
+            self.device = hid.device()
+            self.device.open(self.vendor_id, self.product_id)
+            # Try to set blocking mode for reads used in reader thread
+            try:
+                self.device.set_nonblocking(0)
+            except Exception:
+                pass
+            self.connected = True
+
+            # Reader thread state
+            self._last_report = None
+            self._last_ts = 0.0
+            self._reader_running = True
+            self._lock = threading.Lock()
+            self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self._reader_thread.start()
+            print(f"Connected to Fanatec pedals (VID: {self.vendor_id}, PID: {self.product_id})")
+        except IOError as e:
+            print(f"Failed to connect to Fanatec pedals: {e}")
+            self.device = None
+            self.connected = False
+            return None
+
+    def _reader_loop(self):
+        """Background thread that blocks on HID read and caches the latest report."""
+        while getattr(self, '_reader_running', False) and self.device:
+            try:
+                data = self.device.read(64)  # blocking read
+                if data:
+                    with self._lock:
+                        # store a copy as list for consistent indexing
+                        self._last_report = list(data)
+                        self._last_ts = time.time()
+            except OSError as e:
+                # transient read errors; sleep briefly and continue
+                print(f"Fanatec reader error: {e}")
+                time.sleep(0.005)
+
+    def disconnect(self):
+        """Stop reader thread and close device."""
+        self._reader_running = False
+        # attempt join briefly
+        try:
+            if hasattr(self, '_reader_thread') and self._reader_thread is not None:
+                self._reader_thread.join(timeout=0.1)
+        except Exception:
+            pass
+        if self.device:
+            try:
+                self.device.close()
+            except Exception:
+                pass
+        self.device = None
+        self.connected = False
+
     def handle_input(self):
-        data = self.read_data()
+        """Return the most recent cached report quickly."""
+        if not hasattr(self, '_last_report'):
+            return None, None
+        with self._lock:
+            data = self._last_report
         if data:
-            throttle = int(data[0])
-            brake = int(data[1])
-            #print(f"Fanatec data: {data} -> Throttle: {throttle}, Brake: {brake}")
-            return throttle, brake
+            try:
+                throttle = int(data[0])
+                brake = int(data[1])
+                return throttle, brake
+            except Exception:
+                return None, None
         return None, None
 
 
@@ -92,18 +158,95 @@ class GenericHIDDevice(InputDevice):
     def __init__(self, vendor_id, product_id, mapping=None):
         super().__init__(vendor_id, product_id)
         self.mapping = mapping or {}  # e.g. {'throttle': {'index': 2, 'min': 0, 'max': 255}, ...}
+        # Reader thread fields
+        self._last_report = None
+        self._last_ts = 0.0
+        self._reader_running = False
+        self._lock = threading.Lock()
+
+    def connect(self):
+        """Open device and start a blocking reader thread that caches latest report."""
+        try:
+            self.device = hid.device()
+            self.device.open(self.vendor_id, self.product_id)
+            try:
+                self.device.set_nonblocking(0)
+            except Exception:
+                pass
+            self.connected = True
+
+            # Start reader thread
+            self._reader_running = True
+            self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self._reader_thread.start()
+            print(f"Connected generic HID (VID: {self.vendor_id}, PID: {self.product_id})")
+        except IOError as e:
+            print(f"Failed to connect generic HID (VID: {self.vendor_id}, PID: {self.product_id}): {e}")
+            self.device = None
+            self.connected = False
+            return None
+
+    def _reader_loop(self):
+        """Blocking read loop to cache latest HID report."""
+        while getattr(self, '_reader_running', False) and self.device:
+            try:
+                data = self.device.read(128)  # blocking read
+                if data:
+                    with self._lock:
+                        self._last_report = list(data)
+                        self._last_ts = time.time()
+            except OSError as e:
+                # transient errors
+                print(f"Generic HID reader error: {e}")
+                time.sleep(0.005)
+
+    def disconnect(self):
+        self._reader_running = False
+        try:
+            if hasattr(self, '_reader_thread') and self._reader_thread is not None:
+                self._reader_thread.join(timeout=0.1)
+        except Exception:
+            pass
+        if self.device:
+            try:
+                self.device.close()
+            except Exception:
+                pass
+        self.device = None
+        self.connected = False
 
     def handle_input(self):
-        data = self.read_data(128)
-        if not data or not self.mapping:
+        """Return mapped values from the most recent cached report."""
+        if not self.mapping:
             return None, None, None
+        with self._lock:
+            data = self._last_report
+        if not data:
+            return None, None, None
+
         def get_val(name):
             info = self.mapping.get(name)
             if info is None:
                 return None
-            val = int(data[info['index']])
-            # Optionally scale to 0-255 or 0-2560 here if needed
+            idx = info.get('index')
+            if idx is None or idx >= len(data):
+                return None
+            try:
+                val = int(data[idx])
+            except Exception:
+                return None
+            # Optional scaling if mapping provides min/max
+            if 'min' in info and 'max' in info:
+                minv = info['min']
+                maxv = info['max']
+                if maxv != minv:
+                    # scale to 0-255
+                    try:
+                        val = int((val - minv) * 255 / (maxv - minv))
+                    except Exception:
+                        pass
             return val
+
         throttle = get_val('throttle')
         brake = get_val('brake')
         steering = get_val('steering')
